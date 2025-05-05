@@ -1,0 +1,667 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!-- index.html (for reference, Next.js handles this internally) -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plant Identification App</title>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/app.js"></script>
+</body>
+</html>
+
+<!-- File: package.json -->
+{
+  "name": "plant-identification-app",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.12.0",
+    "@next-auth/prisma-adapter": "^1.0.7",
+    "@prisma/client": "^5.10.2",
+    "@radix-ui/react-tabs": "^1.0.4",
+    "@upstash/redis": "^1.28.4",
+    "cloudinary": "^2.0.3",
+    "next": "^14.2.3",
+    "next-auth": "^4.24.7",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "stripe": "^14.23.0",
+    "tailwindcss": "^3.4.3",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "@types/react": "^18.2.79",
+    "autoprefixer": "^10.4.19",
+    "postcss": "^8.4.38",
+    "prisma": "^5.10.2",
+    "typescript": "^5.4.5"
+  }
+}
+
+<!-- File: next.config.js -->
+module.exports = {
+  images: {
+    domains: ['res.cloudinary.com'],
+  },
+  env: {
+    NEXT_PUBLIC_URL: process.env.NEXT_PUBLIC_URL,
+  },
+};
+
+<!-- File: tailwind.config.js -->
+module.exports = {
+  content: [
+    './app/**/*.{js,ts,jsx,tsx}',
+    './components/**/*.{js,ts,jsx,tsx}',
+  ],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+};
+
+<!-- File: prisma/schema.prisma -->
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  name            String?
+  plan            String    @default("free")
+  dailyCount      Int       @default(0)
+  lastReset       DateTime  @default(now())
+  favorites       String[]  @default([])
+  stripeCustomerId String?   @unique
+  createdAt       DateTime  @default(now())
+  identifications Identification[]
+}
+
+model Identification {
+  id         String    @id @default(uuid())
+  userId     String
+  plantName  String
+  confidence Float
+  imageUrl   String
+  careInfo   Json
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id])
+}
+
+<!-- File: app/globals.css -->
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: Arial, sans-serif;
+}
+
+<!-- File: app/layout.tsx -->
+import './globals.css';
+import { SessionProvider } from 'next-auth/react';
+import { ReactNode } from 'react';
+
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <SessionProvider>{children}</SessionProvider>
+      </body>
+    </html>
+  );
+}
+
+<!-- File: app/page.tsx (Dashboard) -->
+'use client';
+import { useSession } from 'next-auth/react';
+import { useStore } from '@/lib/store';
+import ImageUpload from '@/components/ImageUpload';
+import RecentIdentifications from '@/components/RecentIdentifications';
+import Link from 'next/link';
+
+export default function Dashboard() {
+  const { data: session } = useSession();
+  const { user } = useStore();
+
+  return (
+    <div className="container mx-auto p-4">
+      <h1 className="text-2xl font-bold mb-4">Plant Identification</h1>
+      {session ? (
+        <>
+          <p>Plan: {user?.plan || 'Free'}</p>
+          <p>Daily Count: {user?.plan === 'free' ? `${user?.dailyCount}/3` : user?.plan === 'basic' ? `${user?.dailyCount}/10` : 'Unlimited'}</p>
+          <ImageUpload />
+          <RecentIdentifications />
+          <Link href="/billing" className="text-blue-500">Manage Subscription</Link>
+        </>
+      ) : (
+        <Link href="/api/auth/signin" className="text-blue-500">Sign In</Link>
+      )}
+    </div>
+  );
+}
+
+<!-- File: components/ImageUpload.tsx -->
+'use client';
+import { useState } from 'react';
+import { useSession } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
+
+export default function ImageUpload() {
+  const [file, setFile] = useState<File | null>(null);
+  const { data: session } = useSession();
+  const router = useRouter();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!file || !session) return;
+
+    const formData = new FormData();
+    formData.append('image', file);
+
+    const res = await fetch('/api/identify', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.accessToken}` },
+      body: formData,
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      router.push(`/identification/${data.id}`);
+    }physics://localhost:3000/identification/${data.id}`);
+    } else {
+      alert(res.status === 429 ? 'Daily limit reached' : 'Error identifying plant');
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="mb-4">
+      <input
+        type="file"
+        accept="image/*"
+        onChange={(e) => setFile(e.target.files?.[0] || null)}
+        className="mb-2"
+      />
+      <button type="submit" className="bg-blue-500 text-white px-4 py-2 rounded">
+        Identify Plant
+      </button>
+    </form>
+  );
+}
+
+<!-- File: components/RecentIdentifications.tsx -->
+'use client';
+import { useEffect, useState } from 'react';
+import { useSession } from 'next-auth/react';
+import Link from 'next/link';
+
+export default function RecentIdentifications() {
+  const { data: session } = useSession();
+  const [identifications, setIdentifications] = useState([]);
+
+  useEffect(() => {
+    if (session) {
+      fetch('/api/identifications', {
+        headers: { Authorization: `Bearer ${session.accessToken}` },
+      })
+        .then((res) => res.json())
+        .then((data) => setIdentifications(data.slice(0, 5)));
+    }
+  }, [session]);
+
+  return (
+    <div>
+      <h2 className="text-xl font-bold mb-2">Recent Identifications</h2>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {identifications.map((id: any) => (
+          <Link key={id.id} href={`/identification/${id.id}`}>
+            <div className="border p-4 rounded">
+              <img src={id.imageUrl} alt={id.plantName} className="w-full h-32 object-cover mb-2" />
+              <p>{id.plantName}</p>
+              <p>Confidence: {(id.confidence * 100).toFixed(2)}%</p>
+            </div>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+<!-- File: app/identification/[id]/page.tsx -->
+'use client';
+import { useEffect, useState } from 'react';
+import { useSession } from 'next-auth/react';
+import { useParams } from 'next/navigation';
+
+export default function IdentificationPage() {
+  const { id } = useParams();
+  const { data: session } = useSession();
+  const [identification, setIdentification] = useState<any>(null);
+
+  useEffect(() => {
+    if (session) {
+      fetch(`/api/identifications/${id}`, {
+        headers: { Authorization: `Bearer ${session.accessToken}` },
+      })
+        .then((res) => res.json())
+        .then(setIdentification);
+    }
+  }, [session, id]);
+
+  if (!identification) return <div>Loading...</div>;
+
+  return (
+    <div className="container mx-auto p-4">
+      <h1 className="text-2xl font-bold mb-4">{identification.plantName}</h1>
+      <img src={identification.imageUrl} alt={identification.plantName} className="w-full max-w-md mb-4" />
+      <p>Confidence: {(identification.confidence * 100).toFixed(2)}%</p>
+      <div className="mt-4">
+        <h2 className="text-xl font-bold">Care Instructions</h2>
+        <p>Light: {identification.careInfo.light}</p>
+        <p>Water: {identification.careInfo.water}</p>
+        <p>Soil: {identification.careInfo.soil}</p>
+        {session?.user?.plan === 'premium' && (
+          <p>Pests: {identification.careInfo.pests}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+<!-- File: app/billing/page.tsx -->
+'use client';
+import { useSession } from 'next-auth/react';
+import { useState } from 'react';
+
+export default function BillingPage() {
+  const { data: session } = useSession();
+  const [loading, setLoading] = useState(false);
+
+  const handleSubscribe = async (plan: 'basic' | 'premium') => {
+    setLoading(true);
+    const res = await fetch('/api/subscribe', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session?.accessToken}` },
+      body: JSON.stringify({ plan }),
+    });
+    const { sessionId } = await res.json();
+    const stripe = await (window as any).Stripe(process.env.NEXT_PUBLIC_STRIPE_PUBLIC_KEY);
+    await stripe.redirectToCheckout({ sessionId });
+    setLoading(false);
+  };
+
+  const handlePortal = async () => {
+    setLoading(true);
+    const res = await fetch('/api/billing-portal', {
+      headers: { Authorization: `Bearer ${session?.accessToken}` },
+    });
+    const { url } = await res.json();
+    window.location.href = url;
+    setLoading(false);
+  };
+
+  return (
+    <div className="container mx-auto p-4">
+      <h1 className="text-2xl font-bold mb-4">Billing</h1>
+      <p>Current Plan: {session?.user?.plan || 'Free'}</p>
+      <div className="mt-4">
+        <button
+          onClick={() => handleSubscribe('basic')}
+          disabled={loading}
+          className="bg-blue-500 text-white px-4 py-2 rounded mr-2"
+        >
+          Subscribe to Basic
+        </button>
+        <button
+          onClick={() => handleSubscribe('premium')}
+          disabled={loading}
+          className="bg-blue-500 text-white px-4 py-2 rounded mr-2"
+        >
+          Subscribe to Premium
+        </button>
+        <button
+          onClick={handlePortal}
+          disabled={loading}
+          className="bg-gray-500 text-white px-4 py-2 rounded"
+        >
+          Manage Subscription
+        </button>
+      </div>
+    </div>
+  );
+}
+
+<!-- File: lib/store.ts -->
+import create from 'zustand';
+
+interface UserState {
+  user: { plan: string; dailyCount: number } | null;
+  setUser: (user: { plan: string; dailyCount: number }) => void;
+}
+
+export const useStore = create<UserState>((set) => ({
+  user: null,
+  setUser: (user) => set({ user }),
+}));
+
+<!-- File: lib/auth.ts -->
+import NextAuth from 'next-auth';
+import GoogleProvider from 'next-auth/providers/google';
+import { PrismaAdapter } from '@next-auth/prisma-adapter';
+import { prisma } from '@/lib/prisma';
+
+export const authOptions = {
+  adapter: PrismaAdapter(prisma),
+  providers: [
+    GoogleProvider({
+      clientId: process.env.GOOGLE_CLIENT_ID!,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+    }),
+  ],
+  secret: process.env.NEXTAUTH_SECRET,
+  callbacks: {
+    async session({ session, user }) {
+      session.user.plan = user.plan;
+      session.user.dailyCount = user.dailyCount;
+      return session;
+    },
+  },
+};
+
+export default NextAuth(authOptions);
+
+<!-- File: lib/prisma.ts -->
+import { PrismaClient } from '@prisma/client';
+
+const globalForPrisma = global as unknown as { prisma: PrismaClient };
+
+export const prisma =
+  globalForPrisma.prisma ||
+  new PrismaClient({
+    log: ['query'],
+  });
+
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
+
+<!-- File: lib/stripe.ts -->
+import Stripe from 'stripe';
+
+export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: '2023-10-16',
+});
+
+<!-- File: api/auth/[...nextauth]/route.ts -->
+import { authOptions } from '@/lib/auth';
+import NextAuth from 'next-auth';
+
+export const GET = NextAuth(authOptions);
+export const POST = NextAuth(authOptions);
+
+<!-- File: api/identify/route.ts -->
+import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
+import { prisma } from '@/lib/prisma';
+import { redis } from '@/lib/upstash';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { v2 as cloudinary } from 'cloudinary';
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+
+export async function POST(request: Request) {
+  const session = await getServerSession(authOptions);
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const userId = session.user.id;
+  const user = await redis.hgetall(`user:${userId}`);
+
+  if (user.plan === 'free' && parseInt(user.dailyCount || '0') >= 3) {
+    return NextResponse.json({ error: 'Free plan daily limit reached' }, { status: 429 });
+  }
+  if (user.plan === 'basic' && parseInt(user.dailyCount || '0') >= 10) {
+    return NextResponse.json({ error: 'Basic plan daily limit reached' }, { status: 429 });
+  }
+
+  const formData = await request.formData();
+  const image = formData.get('image') as File;
+  const buffer = Buffer.from(await image.arrayBuffer());
+
+  // Upload to Cloudinary
+  const uploadResult = await new Promise((resolve, reject) => {
+    cloudinary.uploader.upload_stream(
+      { resource_type: 'image' },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      }
+    ).end(buffer);
+  });
+
+  // Call Gemini API
+  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const result = await model.generateContent([
+    {
+      inlineData: {
+        mimeType: image.type,
+        data: buffer.toString('base64'),
+      },
+    },
+    {
+      text: 'Identify this plant and provide its common name, scientific name, and care instructions (light, water, soil, pests).',
+    },
+  ]);
+  const response = await result.response;
+  const plantData = JSON.parse(response.text()); // Assuming Gemini returns JSON
+
+  // Save to database
+  const identification = await prisma.identification.create({
+    data: {
+      userId,
+      plantName: plantData.commonName,
+      confidence: plantData.confidence || 0.9,
+      imageUrl: uploadResult.secure_url,
+      careInfo: {
+        light: plantData.light,
+        water: plantData.water,
+        soil: plantData.soil,
+        pests: plantData.pests,
+      },
+    },
+  });
+
+  // Increment daily count
+  if (user.plan !== 'premium') {
+    await redis.hincrby(`user:${userId}`, 'dailyCount', 1);
+  }
+
+  return NextResponse.json(identification);
+}
+
+<!-- File: api/identifications/route.ts -->
+import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
+import { prisma } from '@/lib/prisma';
+
+export async function GET() {
+  const session = await getServerSession(authOptions);
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const identifications = await prisma.identification.findMany({
+    where: { userId: session.user.id },
+    orderBy: { createdAt: 'desc' },
+    take: session.user.plan === 'free' ? 5 : 20,
+  });
+
+  return NextResponse.json(identifications);
+}
+
+<!-- File: api/identifications/[id]/route.ts -->
+import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
+import { prisma } from '@/lib/prisma';
+
+export async function GET(request: Request, { params }: { params: { id: string } }) {
+  const session = await getServerSession(authOptions);
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const identification = await prisma.identification.findUnique({
+    where: { id: params.id, userId: session.user.id },
+  });
+
+  if (!identification) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+
+  return NextResponse.json(identification);
+}
+
+<!-- File: api/subscribe/route.ts -->
+import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
+import { stripe } from '@/lib/stripe';
+
+export async function POST(request: Request) {
+  const session = await getServerSession(authOptions);
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const { plan } = await request.json();
+
+  const checkoutSession = await stripe.checkout.sessions.create({
+    customer_email: session.user.email,
+    payment_method_types: ['card'],
+    mode: 'subscription',
+    line_items: [
+      {
+        price: plan === 'basic' ? process.env.STRIPE_BASIC_PRICE_ID : process.env.STRIPE_PREMIUM_PRICE_ID,
+        quantity: 1,
+      },
+    ],
+    success_url: `${process.env.NEXT_PUBLIC_URL}/dashboard?success=true`,
+    cancel_url: `${process.env.NEXT_PUBLIC_URL}/billing?canceled=true`,
+  });
+
+  return NextResponse.json({ sessionId: checkoutSession.id });
+}
+
+<!-- File: api/billing-portal/route.ts -->
+import { NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
+import { stripe } from '@/lib/stripe';
+import { prisma } from '@/lib/prisma';
+
+export async function POST() {
+  const session = await getServerSession(authOptions);
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const user = await prisma.user.findUnique({ where: { email: session.user.email } });
+  if (!user?.stripeCustomerId) return NextResponse.json({ error: 'No subscription found' }, { status: 400 });
+
+  const portalSession = await stripe.billingPortal.sessions.create({
+    customer: user.stripeCustomerId,
+    return_url: `${process.env.NEXT_PUBLIC_URL}/billing`,
+  });
+
+  return NextResponse.json({ url: portalSession.url });
+}
+
+<!-- File: api/webhooks/stripe/route.ts -->
+import { NextResponse } from 'next/server';
+import { stripe } from '@/lib/stripe';
+import { prisma } from '@/lib/prisma';
+import { buffer } from 'micro';
+
+export async function POST(request: Request) {
+  const signature = request.headers.get('stripe-signature')!;
+  const buf = await buffer(request);
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(buf, signature, process.env.STRIPE_WEBHOOK_SECRET!);
+  } catch (err) {
+    return NextResponse.json({ error: 'Webhook signature verification failed' }, { status: 400 });
+  }
+
+  switch (event.type) {
+    case 'customer.subscription.created':
+    case 'customer.subscription.updated':
+      const subscription = event.data.object as any;
+      const plan = subscription.items.data[0].price.id === process.env.STRIPE_BASIC_PRICE_ID ? 'basic' : 'premium';
+      await prisma.user.update({
+        where: { stripeCustomerId: subscription.customer },
+        data: { plan, dailyCount: 0, stripeCustomerId: subscription.customer },
+      });
+      break;
+    case 'customer.subscription.deleted':
+      await prisma.user.update({
+        where: { stripeCustomerId: subscription.customer },
+        data: { plan: 'free', dailyCount: 0 },
+      });
+      break;
+  }
+
+  return NextResponse.json({ received: true });
+}
+
+<!-- File: lib/upstash.ts -->
+import { Redis } from '@upstash/redis';
+
+export const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_URL!,
+  token: process.env.UPSTASH_REDIS_TOKEN!,
+});
